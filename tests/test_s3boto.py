@@ -286,3 +286,17 @@ class S3BotoStorageTests(S3BotoTestCase):
             self.assertEqual(modtime,
                              tz.make_naive(tz.make_aware(
                                 datetime.datetime.strptime(utcnow, ISO8601), tz.utc)))
+
+    def test_get_headers_default(self):
+        result = self.storage.get_headers("filename")
+        self.assertEqual(result, {})
+
+    def test_get_extra_headers(self):
+        extra_headers = [
+            ("storage/img/.*", {"extra header": "value"})
+        ]
+        self.storage.extra_headers = extra_headers
+        result = self.storage.get_extra_headers("storage/img/testimage")
+        self.assertDictEqual(result, extra_headers[0][1])
+        result = self.storage.get_extra_headers("storage/not/matching/file")
+        self.assertDictEqual(result, {})

@@ -47,7 +47,7 @@ Available are numerous settings. It should be especially noted the following:
     Your Amazon Web Services storage bucket name, as a string.
 
 ``AWS_DEFAULT_ACL`` (optional)
-    If set to ``private`` changes uploaded file's Access Control List from the default permission ``public-read`` to give owner full control and remove read access from everyone else. 
+    If set to ``private`` changes uploaded file's Access Control List from the default permission ``public-read`` to give owner full control and remove read access from everyone else.
 
 ``AWS_AUTO_CREATE_BUCKET`` (optional)
     If set to ``True`` the bucket specified in ``AWS_STORAGE_BUCKET_NAME`` is automatically created.
@@ -59,6 +59,17 @@ Available are numerous settings. It should be especially noted the following:
             'Expires': 'Thu, 15 Apr 2010 20:00:00 GMT',
             'Cache-Control': 'max-age=86400',
         }
+
+``AWS_EXTRA_HEADERS`` (optional)
+
+This option allows to set additional headers for files matching special regex
+For example if you want to add "Cache-Control" header for all png images add
+
+AWS_EXTRA_HEADERS = [
+  (".*png", {"Cache-Control": "max-age=86400"})
+]
+
+To allow ``django-admin.py`` collectstatic to automatically put your static files in your bucket set the following in your settings.py::
 
 ``AWS_S3_OBJECT_PARAMETERS`` (optional - boto3 only)
   Use this to set object parameters on your object (such as CacheControl)::
