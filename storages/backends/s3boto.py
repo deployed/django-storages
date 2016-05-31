@@ -1,4 +1,5 @@
 import os
+import re
 import mimetypes
 from gzip import GzipFile
 import datetime
@@ -69,7 +70,7 @@ def safe_join(base, *paths):
     # equal to base_path).
     base_path_len = len(base_path)
     if (not final_path.startswith(base_path) or
-            final_path[base_path_len:base_path_len + 1] not in ('', '/')):
+                final_path[base_path_len:base_path_len + 1] not in ('', '/')):
         raise ValueError('the joined path is located outside of the base path'
                          ' component')
 
@@ -212,6 +213,7 @@ class S3BotoStorage(Storage):
     secret_key = setting('AWS_S3_SECRET_ACCESS_KEY', setting('AWS_SECRET_ACCESS_KEY'))
     file_overwrite = setting('AWS_S3_FILE_OVERWRITE', True)
     headers = setting('AWS_HEADERS', {})
+    extra_headers = setting("AWS_EXTRA_HEADERS", [("", {})])
     bucket_name = setting('AWS_STORAGE_BUCKET_NAME')
     auto_create_bucket = setting('AWS_AUTO_CREATE_BUCKET', False)
     default_acl = setting('AWS_DEFAULT_ACL', 'public-read')
@@ -295,11 +297,13 @@ class S3BotoStorage(Storage):
         are provided to the class in the constructor or in the
         settings then get them from the environment variables.
         """
+
         def lookup_env(names):
             for name in names:
                 value = os.environ.get(name)
                 if value:
                     return value
+
         access_key = self.access_key or lookup_env(self.access_key_names)
         secret_key = self.secret_key or lookup_env(self.secret_key_names)
         return access_key, secret_key
@@ -320,6 +324,9 @@ class S3BotoStorage(Storage):
                                        "can be automatically created by "
                                        "setting AWS_AUTO_CREATE_BUCKET to "
                                        "``True``." % name)
+
+    def _get_headers(self):
+        return self.headers.copy()
 
     def _clean_name(self, name):
         """
@@ -369,7 +376,8 @@ class S3BotoStorage(Storage):
     def _save(self, name, content):
         cleaned_name = self._clean_name(name)
         name = self._normalize_name(cleaned_name)
-        headers = self.headers.copy()
+        headers = self.get_headers(name)
+        _type, encoding = mimetypes.guess_type(name)
         content_type = getattr(content, 'content_type',
             mimetypes.guess_type(name)[0] or self.key_class.DefaultContentType)
 
@@ -398,9 +406,9 @@ class S3BotoStorage(Storage):
         if self.encryption:
             kwargs['encrypt_key'] = self.encryption
         key.set_contents_from_file(content, headers=headers,
-                                   policy=self.default_acl,
-                                   reduced_redundancy=self.reduced_redundancy,
-                                   rewind=True, **kwargs)
+            policy=self.default_acl,
+            reduced_redundancy=self.reduced_redundancy,
+            rewind=True, **kwargs)
 
     def delete(self, name):
         name = self._normalize_name(self._clean_name(name))
@@ -469,3 +477,15 @@ class S3BotoStorage(Storage):
             name = self._clean_name(name)
             return name
         return super(S3BotoStorage, self).get_available_name(name)
+
+    def get_extra_headers(self, name):
+        _headers = {}
+        for regex, headers in self.extra_headers:
+            if re.match(regex, name):
+                _headers.update(headers)
+        return _headers
+
+    def get_headers(self, name):
+        headers = self._get_headers()
+        headers.update(self.get_extra_headers(name))
+        return headers
