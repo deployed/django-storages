@@ -1,12 +1,15 @@
-from datetime import datetime
-import os.path
 import mimetypes
+import os.path
 import time
+from datetime import datetime
 from time import mktime
 
-from django.core.files.base import ContentFile
 from django.core.exceptions import ImproperlyConfigured
-from storages.compat import Storage
+from django.core.files.base import ContentFile
+from django.core.files.storage import Storage
+from django.utils.deconstruct import deconstructible
+
+from storages.utils import setting
 
 try:
     import azure  # noqa
@@ -23,13 +26,12 @@ except ImportError:
     from azure.storage import BlobService
     from azure import WindowsAzureMissingResourceError as AzureMissingResourceHttpError
 
-from storages.utils import setting
-
 
 def clean_name(name):
     return os.path.normpath(name).replace("\\", "/")
 
 
+@deconstructible
 class AzureStorage(Storage):
     account_name = setting("AZURE_ACCOUNT_NAME")
     account_key = setting("AZURE_ACCOUNT_KEY")

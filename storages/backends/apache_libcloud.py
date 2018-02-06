@@ -4,12 +4,12 @@
 import os
 
 from django.conf import settings
-from django.core.files.base import File
 from django.core.exceptions import ImproperlyConfigured
-from django.utils.six import string_types
+from django.core.files.base import File
+from django.core.files.storage import Storage
+from django.utils.deconstruct import deconstructible
+from django.utils.six import BytesIO, string_types
 from django.utils.six.moves.urllib.parse import urljoin
-
-from storages.compat import BytesIO, deconstructible, Storage
 
 try:
     from libcloud.storage.providers import get_driver
@@ -33,6 +33,9 @@ class LibCloudStorage(Storage):
         extra_kwargs = {}
         if 'region' in self.provider:
             extra_kwargs['region'] = self.provider['region']
+        # Used by the GoogleStorageDriver
+        if 'project' in self.provider:
+            extra_kwargs['project'] = self.provider['project']
         try:
             provider_type = self.provider['type']
             if isinstance(provider_type, string_types):

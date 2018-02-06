@@ -1,18 +1,26 @@
-import os
-import posixpath
-import re
 import mimetypes
+import os
+import re
+import urlparse
 from datetime import datetime
 from gzip import GzipFile
 from tempfile import SpooledTemporaryFile
 
-from django.core.files.base import File
 from django.core.exceptions import ImproperlyConfigured, SuspiciousOperation
-from django.utils.encoding import force_text, smart_str, filepath_to_uri, force_bytes
+from django.core.files.base import File
+from django.core.files.storage import Storage
+from django.utils import timezone as tz
+from django.utils.deconstruct import deconstructible
+from django.utils.encoding import (
+    filepath_to_uri, force_bytes, force_text, smart_str,
+)
+from django.utils.six import BytesIO
+
+from storages.utils import clean_name, safe_join, setting
 
 try:
     from boto import __version__ as boto_version
-    from boto.s3.connection import S3Connection, SubdomainCallingFormat
+    from boto.s3.connection import S3Connection, SubdomainCallingFormat, Location
     from boto.exception import S3ResponseError
     from boto.s3.key import Key as S3Key
     from boto.utils import parse_ts, ISO8601
@@ -20,8 +28,6 @@ except ImportError:
     raise ImproperlyConfigured("Could not load Boto's S3 bindings.\n"
                                "See https://github.com/boto/boto")
 
-from storages.utils import setting
-from storages.compat import urlparse, BytesIO, deconstructible, Storage
 
 boto_version_info = tuple([int(i) for i in boto_version.split('-')[0].split('.')])
 
@@ -112,8 +118,8 @@ class S3BotoStorageFile(File):
         if self._file is None:
             self._file = SpooledTemporaryFile(
                 max_size=self._storage.max_memory_size,
-                suffix=".S3BotoStorageFile",
-                dir=setting("FILE_UPLOAD_TEMP_DIR", None)
+                suffix='.S3BotoStorageFile',
+                dir=setting('FILE_UPLOAD_TEMP_DIR', None)
             )
             if 'r' in self._mode:
                 self._is_dirty = False
@@ -130,12 +136,12 @@ class S3BotoStorageFile(File):
 
     def read(self, *args, **kwargs):
         if 'r' not in self._mode:
-            raise AttributeError("File was not opened in read mode.")
+            raise AttributeError('File was not opened in read mode.')
         return super(S3BotoStorageFile, self).read(*args, **kwargs)
 
     def write(self, content, *args, **kwargs):
         if 'w' not in self._mode:
-            raise AttributeError("File was not opened in write mode.")
+            raise AttributeError('File was not opened in write mode.')
         self._is_dirty = True
         if self._multipart is None:
             provider = self.key.bucket.connection.provider
@@ -164,9 +170,6 @@ class S3BotoStorageFile(File):
         return length
 
     def _flush_write_buffer(self):
-        """
-        Flushes the write buffer.
-        """
         if self._buffer_file_size:
             self._write_counter += 1
             self.file.seek(0)
@@ -179,7 +182,7 @@ class S3BotoStorageFile(File):
             self._flush_write_buffer()
             self._multipart.complete_upload()
         else:
-            if not self._multipart is None:
+            if self._multipart is not None:
                 self._multipart.cancel_upload()
         self.key.close()
         if self._file is not None:
@@ -204,6 +207,7 @@ class S3BotoStorage(Storage):
     # used for looking up the access and secret key from env vars
     access_key_names = ['AWS_S3_ACCESS_KEY_ID', 'AWS_ACCESS_KEY_ID']
     secret_key_names = ['AWS_S3_SECRET_ACCESS_KEY', 'AWS_SECRET_ACCESS_KEY']
+    security_token_names = ['AWS_SESSION_TOKEN', 'AWS_SECURITY_TOKEN']
 
     access_key = setting('AWS_S3_ACCESS_KEY_ID', setting('AWS_ACCESS_KEY_ID'))
     secret_key = setting('AWS_S3_SECRET_ACCESS_KEY', setting('AWS_SECRET_ACCESS_KEY'))
@@ -218,6 +222,7 @@ class S3BotoStorage(Storage):
     querystring_expire = setting('AWS_QUERYSTRING_EXPIRE', 3600)
     reduced_redundancy = setting('AWS_REDUCED_REDUNDANCY', False)
     location = setting('AWS_LOCATION', '')
+    origin = setting('AWS_ORIGIN', Location.DEFAULT)
     encryption = setting('AWS_S3_ENCRYPTION', False)
     custom_domain = setting('AWS_S3_CUSTOM_DOMAIN')
     calling_format = setting('AWS_S3_CALLING_FORMAT', SubdomainCallingFormat())
@@ -266,24 +271,35 @@ class S3BotoStorage(Storage):
         self._entries = {}
         self._bucket = None
         self._connection = None
+        self._loaded_meta = False
 
+        self.security_token = None
         if not self.access_key and not self.secret_key:
             self.access_key, self.secret_key = self._get_access_keys()
+            self.security_token = self._get_security_token()
 
     @property
     def connection(self):
         if self._connection is None:
+            kwargs = self._get_connection_kwargs()
+
             self._connection = self.connection_class(
                 self.access_key,
                 self.secret_key,
-                is_secure=self.use_ssl,
-                calling_format=self.calling_format,
-                host=self.host,
-                port=self.port,
-                proxy=self.proxy,
-                proxy_port=self.proxy_port
+                **kwargs
             )
         return self._connection
+
+    def _get_connection_kwargs(self):
+        return dict(
+            security_token=self.security_token,
+            is_secure=self.use_ssl,
+            calling_format=self.calling_format,
+            host=self.host,
+            port=self.port,
+            proxy=self.proxy,
+            proxy_port=self.proxy_port
+        )
 
     @property
     def bucket(self):
@@ -300,10 +316,19 @@ class S3BotoStorage(Storage):
         """
         Get the locally cached files for the bucket.
         """
-        if self.preload_metadata and not self._entries:
-            self._entries = dict((self._decode_name(entry.key), entry)
-                                 for entry in self.bucket.list(prefix=self.location))
+        if self.preload_metadata and not self._loaded_meta:
+            self._entries.update({
+                self._decode_name(entry.key): entry
+                for entry in self.bucket.list(prefix=self.location)
+            })
+            self._loaded_meta = True
         return self._entries
+
+    def _lookup_env(self, names):
+        for name in names:
+            value = os.environ.get(name)
+            if value:
+                return value
 
     def _get_access_keys(self):
         """
@@ -311,16 +336,13 @@ class S3BotoStorage(Storage):
         are provided to the class in the constructor or in the
         settings then get them from the environment variables.
         """
-
-        def lookup_env(names):
-            for name in names:
-                value = os.environ.get(name)
-                if value:
-                    return value
-
-        access_key = self.access_key or lookup_env(self.access_key_names)
-        secret_key = self.secret_key or lookup_env(self.secret_key_names)
+        access_key = self.access_key or self._lookup_env(self.access_key_names)
+        secret_key = self.secret_key or self._lookup_env(self.secret_key_names)
         return access_key, secret_key
+
+    def _get_security_token(self):
+        security_token = self._lookup_env(self.security_token_names)
+        return security_token
 
     def _get_or_create_bucket(self, name):
         """
@@ -330,13 +352,13 @@ class S3BotoStorage(Storage):
             return self.connection.get_bucket(name, validate=self.auto_create_bucket)
         except self.connection_response_error:
             if self.auto_create_bucket:
-                bucket = self.connection.create_bucket(name)
+                bucket = self.connection.create_bucket(name, location=self.origin)
                 bucket.set_acl(self.bucket_acl)
                 return bucket
-            raise ImproperlyConfigured("Bucket %s does not exist. Buckets "
-                                       "can be automatically created by "
-                                       "setting AWS_AUTO_CREATE_BUCKET to "
-                                       "``True``." % name)
+            raise ImproperlyConfigured('Bucket %s does not exist. Buckets '
+                                       'can be automatically created by '
+                                       'setting AWS_AUTO_CREATE_BUCKET to '
+                                       '``True``.' % name)
 
     def _get_headers(self):
         return self.headers.copy()
@@ -345,16 +367,7 @@ class S3BotoStorage(Storage):
         """
         Cleans the name so that Windows style paths work
         """
-        # Normalize Windows style paths
-        clean_name = posixpath.normpath(name).replace('\\', '/')
-
-        # os.path.normpath() can strip trailing slashes so we implement
-        # a workaround here.
-        if name.endswith('/') and not clean_name.endswith('/'):
-            # Add a trailing slash as it was stripped.
-            return clean_name + '/'
-        else:
-            return clean_name
+        return clean_name(name)
 
     def _normalize_name(self, name):
         """
@@ -377,7 +390,11 @@ class S3BotoStorage(Storage):
     def _compress_content(self, content):
         """Gzip a given string content."""
         zbuf = BytesIO()
-        zfile = GzipFile(mode='wb', compresslevel=6, fileobj=zbuf)
+        #  The GZIP header has a modification time attribute (see http://www.zlib.org/rfc-gzip.html)
+        #  This means each time a file is compressed it changes even if the other contents don't change
+        #  For S3 this defeats detection of changes using MD5 sums on gzipped files
+        #  Fixing the mtime at 0.0 at compression time avoids this problem
+        zfile = GzipFile(mode='wb', compresslevel=6, fileobj=zbuf, mtime=0.0)
         try:
             zfile.write(force_bytes(content.read()))
         finally:
@@ -435,6 +452,12 @@ class S3BotoStorage(Storage):
             reduced_redundancy=self.reduced_redundancy,
             rewind=True, **kwargs)
 
+    def _get_key(self, name):
+        name = self._normalize_name(self._clean_name(name))
+        if self.entries:
+            return self.entries.get(name)
+        return self.bucket.get_key(self._encode_name(name))
+
     def delete(self, name):
         name = self._normalize_name(self._clean_name(name))
         self.bucket.delete_key(self._encode_name(name))
@@ -447,11 +470,7 @@ class S3BotoStorage(Storage):
             except ImproperlyConfigured:
                 return False
 
-        name = self._normalize_name(self._clean_name(name))
-        if self.entries:
-            return name in self.entries
-        k = self.bucket.new_key(self._encode_name(name))
-        return k.exists()
+        return self._get_key(name) is not None
 
     def listdir(self, name):
         name = self._normalize_name(self._clean_name(name))
@@ -463,9 +482,9 @@ class S3BotoStorage(Storage):
         dirlist = self.bucket.list(self._encode_name(name))
         files = []
         dirs = set()
-        base_parts = name.split("/")[:-1]
+        base_parts = name.split('/')[:-1]
         for item in dirlist:
-            parts = item.name.split("/")
+            parts = item.name.split('/')
             parts = parts[len(base_parts):]
             if len(parts) == 1:
                 # File
@@ -476,29 +495,21 @@ class S3BotoStorage(Storage):
         return list(dirs), files
 
     def size(self, name):
-        name = self._normalize_name(self._clean_name(name))
-        if self.entries:
-            entry = self.entries.get(name)
-            if entry:
-                return entry.size
-            return 0
-        return self.bucket.get_key(self._encode_name(name)).size
+        return self._get_key(name).size
+
+    def get_modified_time(self, name):
+        dt = tz.make_aware(parse_ts(self._get_key(name).last_modified), tz.utc)
+        return dt if setting('USE_TZ') else tz.make_naive(dt)
 
     def modified_time(self, name):
-        name = self._normalize_name(self._clean_name(name))
-        entry = self.entries.get(name)
-        # only call self.bucket.get_key() if the key is not found
-        # in the preloaded metadata.
-        if entry is None:
-            entry = self.bucket.get_key(self._encode_name(name))
-        # Parse the last_modified string to a local datetime object.
-        return parse_ts(entry.last_modified)
+        dt = tz.make_aware(parse_ts(self._get_key(name).last_modified), tz.utc)
+        return tz.make_naive(dt)
 
     def url(self, name, headers=None, response_headers=None, expire=None):
         # Preserve the trailing slash after normalizing the path.
         name = self._normalize_name(self._clean_name(name))
         if self.custom_domain:
-            return "%s//%s/%s" % (self.url_protocol,
+            return '%s//%s/%s' % (self.url_protocol,
                                   self.custom_domain, filepath_to_uri(name))
 
         if expire is None:

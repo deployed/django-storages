@@ -1,4 +1,5 @@
 from setuptools import setup
+
 import storages
 
 
@@ -11,6 +12,7 @@ def get_requirements_tests():
     with open('requirements-tests.txt') as f:
         return f.readlines()
 
+
 setup(
     name='django-storages',
     version=storages.__version__,
@@ -18,13 +20,16 @@ setup(
     author='Josh Schneier',
     author_email='josh.schneier@gmail.com',
     license='BSD',
-    description='Support for many storages (S3, MogileFS, etc) in Django.',
+    description='Support for many storage backends in Django',
     long_description=read('README.rst') + '\n\n' + read('CHANGELOG.rst'),
     url='https://github.com/jschneier/django-storages',
     classifiers=[
-        'Framework :: Django',
         'Development Status :: 5 - Production/Stable',
         'Environment :: Web Environment',
+        'Framework :: Django',
+        'Framework :: Django :: 1.8',
+        'Framework :: Django :: 1.10',
+        'Framework :: Django :: 1.11',
         'Intended Audience :: Developers',
         'License :: OSI Approved :: BSD License',
         'Operating System :: OS Independent',
@@ -35,6 +40,7 @@ setup(
         'Programming Language :: Python :: 3.3',
         'Programming Language :: Python :: 3.4',
         'Programming Language :: Python :: 3.5',
+        'Programming Language :: Python :: 3.6',
     ],
     tests_require=get_requirements_tests(),
     test_suite='tests',
