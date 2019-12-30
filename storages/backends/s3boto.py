@@ -508,7 +508,7 @@ class S3BotoStorage(Storage):
                 _headers.update(headers)
         return _headers
 
-    def get_headers(self, name):
+    def get_headers(self, name, *args, **kwargs):
         headers = self._get_headers()
         headers.update(self.get_extra_headers(name))
         return headers
